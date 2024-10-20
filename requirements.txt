@@ -1,0 +1,4 @@
+scrapy
+beautifulsoup4~=4.12.3
+selenium~=4.25.0
+requests~=2.32.3
