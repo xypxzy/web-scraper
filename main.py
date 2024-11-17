@@ -2,6 +2,12 @@ from scrapers.beautifulsoup_scraper import BeautifulSoupScraper
 from scrapers.selenium_scraper import SeleniumScraper
 import logging
 
+def process_scraper(scraper, url):
+    result = scraper.scrape(url)
+    if result:
+        print(f"{scraper.__class__.__name__} result:")
+    else:
+        print(f"{scraper.__class__.__name__} failed to fetch the page.")
 
 def main():
     logging.basicConfig(level=logging.INFO)
@@ -11,24 +17,12 @@ def main():
 
     # Using BeautifulSoupScraper
     bs_scraper = BeautifulSoupScraper()
-    bs_soup = bs_scraper.scrape(url)
-
-    if bs_soup:
-        print("BeautifulSoupScraper result:")
-        print(bs_soup.prettify())
-    else:
-        print("BeautifulSoupScraper failed to fetch the page.")
+    process_scraper(bs_scraper, url)
 
     # Using SeleniumScraper
     selenium_scraper = SeleniumScraper()
-    selenium_page_source = selenium_scraper.scrape(url)
-
-    if selenium_page_source:
-        print("SeleniumScraper result:")
-        print(selenium_page_source)
-    else:
-        print("SeleniumScraper failed to fetch the page.")
-
+    process_scraper(selenium_scraper, url)
+    selenium_scraper.close()
 
 if __name__ == "__main__":
     main()

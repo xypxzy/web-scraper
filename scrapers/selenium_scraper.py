@@ -19,5 +19,6 @@ class SeleniumScraper(BaseScraper):
         except Exception as e:
             self.log_error(f"Error loading page: {e}")
             return None
-        finally:
-            self.driver.quit()
+
+    def close(self):
+        self.driver.quit()

@@ -8,8 +8,18 @@ class BeautifulSoupScraper(BaseScraper):
         try:
             response = requests.get(url, headers={"User-Agent": "Mozilla/5.0"}, timeout=10)
             response.raise_for_status()
-            soup = BeautifulSoup(response.content, "html.parser")
-            return soup
+        except requests.HTTPError as http_err:
+            self.log_error(f"HTTP error occurred: {http_err}")
+            return None
+        except requests.ConnectionError as conn_err:
+            self.log_error(f"Connection error occurred: {conn_err}")
+            return None
+        except requests.Timeout as timeout_err:
+            self.log_error(f"Request timed out: {timeout_err}")
+            return None
         except requests.RequestException as e:
             self.log_error(f"Error fetching page: {e}")
             return None
+        else:
+            soup = BeautifulSoup(response.content, "html.parser")
+            return soup
