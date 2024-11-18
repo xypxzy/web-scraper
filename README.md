@@ -44,7 +44,8 @@ project_root/
 │   ├── base_analyzer.py
 │   ├── html_structure_analyzer.py
 │   ├── seo_analyzer.py
-│   └── content_analyzer.py
+│   ├── content_analyzer.py
+|   └── text_analyzer.py
 ├── models/
 │   └── (machine learning models)
 ├── reports/
