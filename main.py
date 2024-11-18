@@ -1,16 +1,19 @@
 from analyzers.content_analyzer import ContentAnalyzer
 from analyzers.html_sctructure_analyzer import HTMLStructureAnalyzer
 from analyzers.seo_analyzer import SEOAnalyzer
+from analyzers.text_analyzer import TextAnalyzer
 from logs.process_scraper import process_scraper
 from scrapers.beautifulsoup_scraper import BeautifulSoupScraper
 from scrapers.selenium_scraper import SeleniumScraper
 import logging
+
 
 def main():
     logging.basicConfig(level=logging.INFO)
 
     # URL to scrape
     url = "https://dastan-test.goldkeeper.net/html/phantom/index.html"
+    # url = "https://world.hey.com/dhh/to-the-crazy-ones-e43822c7?ref=dailydev"
 
     # TODO: по сути нужно использовать только один,
     #  потому что один для динамического контента, а другой для статического.
@@ -23,12 +26,25 @@ def main():
     if html_content:
         logging.info("Page loaded successfully.")
 
-        # Initialize the analyzer
-        analyzer = HTMLStructureAnalyzer()
-        analysis_results = analyzer.analyze(html_content)
+        # HTML structure analyzer
+        structure_analyzer = HTMLStructureAnalyzer()
+        structure_results = structure_analyzer.analyze(html_content, url)
 
-        elements = analysis_results['elements']
-        recommendations = analysis_results['recommendations']
+        elements = structure_results['elements']
+        recommendations = structure_results['recommendations']
+
+        # Text analysis
+        text_analyzer = TextAnalyzer()
+        extracted_texts = text_analyzer.extract_text(html_content)
+        full_text = extracted_texts['full_text']
+
+        sentiment_results = text_analyzer.analyze_sentiment(extracted_texts['headings'])
+        readability = text_analyzer.readability_score(full_text)
+        keywords = text_analyzer.analyze_keywords(full_text)
+
+        text_recommendations = text_analyzer.generate_recommendations(extracted_texts, sentiment_results, readability,
+                                                                      keywords)
+        recommendations.extend(text_recommendations)
 
         # SEO analysis
         seo_analyzer = SEOAnalyzer()
@@ -41,21 +57,26 @@ def main():
         recommendations.extend(content_recommendations)
 
         # Print the results
-        print("Elements:")
-        for key, value in elements.items():
-            print(f"\n{key.upper()}:")
-            for item in value:
-                print(f"- {item}")
+        # print("Elements:")
+        # for key, value in elements.items():
+        #     print(f"\n{key.upper()}:")
+        #     for item in value:
+        #         print(f"- {item}")
+
+        print("\nИзвлеченный текст:")
+        print("Заголовки:", extracted_texts['headings'])
+        print("Ключевые слова:", keywords)
+        print("Показатель читаемости:", readability)
 
         print("\nRecommendations:")
         for recommendation in recommendations:
             print(f"- {recommendation}")
-        logging.error("Error loading page.")
 
     # Using SeleniumScraper
     # selenium_scraper = SeleniumScraper()
     # process_scraper(selenium_scraper, url)
     # selenium_scraper.close()
+
 
 if __name__ == "__main__":
     main()

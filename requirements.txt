@@ -4,3 +4,5 @@ selenium~=4.25.0
 requests~=2.32.3
 transformers
 torch
+keybert
+textstat

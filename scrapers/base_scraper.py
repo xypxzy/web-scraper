@@ -1,6 +1,5 @@
 import logging
 
-
 class BaseScraper:
     def __init__(self):
         """Initialize the scraper with a logger."""
