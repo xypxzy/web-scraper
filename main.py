@@ -2,9 +2,8 @@ from analyzers.content_analyzer import ContentAnalyzer
 from analyzers.html_sctructure_analyzer import HTMLStructureAnalyzer
 from analyzers.seo_analyzer import SEOAnalyzer
 from analyzers.text_analyzer import TextAnalyzer
-from logs.process_scraper import process_scraper
+from db.db_handler import DBHandler
 from scrapers.beautifulsoup_scraper import BeautifulSoupScraper
-from scrapers.selenium_scraper import SeleniumScraper
 import logging
 
 
@@ -26,51 +25,59 @@ def main():
     if html_content:
         logging.info("Page loaded successfully.")
 
-        # HTML structure analyzer
-        structure_analyzer = HTMLStructureAnalyzer()
-        structure_results = structure_analyzer.analyze(html_content, url)
+        db_handler = DBHandler()
 
-        elements = structure_results['elements']
-        recommendations = structure_results['recommendations']
+        try:
+            # HTML structure analyzer
+            structure_analyzer = HTMLStructureAnalyzer()
+            structure_results = structure_analyzer.analyze(html_content, url)
 
-        # Text analysis
-        text_analyzer = TextAnalyzer()
-        extracted_texts = text_analyzer.extract_text(html_content)
-        full_text = extracted_texts['full_text']
+            elements = structure_results['elements']
+            recommendations = structure_results['recommendations']
 
-        sentiment_results = text_analyzer.analyze_sentiment(extracted_texts['headings'])
-        readability = text_analyzer.readability_score(full_text)
-        keywords = text_analyzer.analyze_keywords(full_text)
+            # Text analysis
+            text_analyzer = TextAnalyzer()
+            extracted_texts = text_analyzer.extract_text(html_content)
+            full_text = extracted_texts['full_text']
 
-        text_recommendations = text_analyzer.generate_recommendations(extracted_texts, sentiment_results, readability,
-                                                                      keywords)
-        recommendations.extend(text_recommendations)
+            sentiment_results = text_analyzer.analyze_sentiment(extracted_texts['headings'])
+            readability = text_analyzer.readability_score(full_text)
+            keywords = text_analyzer.analyze_keywords(full_text)
 
-        # SEO analysis
-        seo_analyzer = SEOAnalyzer()
-        seo_recommendations = seo_analyzer.analyze(elements)
-        recommendations.extend(seo_recommendations)
+            text_recommendations = text_analyzer.generate_recommendations(extracted_texts, sentiment_results,
+                                                                          readability,
+                                                                          keywords)
+            recommendations.extend(text_recommendations)
 
-        # Content analysis
-        content_analyzer = ContentAnalyzer()
-        content_recommendations = content_analyzer.analyze(elements)
-        recommendations.extend(content_recommendations)
+            # SEO analysis
+            seo_analyzer = SEOAnalyzer()
+            seo_recommendations = seo_analyzer.analyze(elements)
+            recommendations.extend(seo_recommendations)
 
-        # Print the results
-        # print("Elements:")
-        # for key, value in elements.items():
-        #     print(f"\n{key.upper()}:")
-        #     for item in value:
-        #         print(f"- {item}")
+            # Content analysis
+            content_analyzer = ContentAnalyzer()
+            content_recommendations = content_analyzer.analyze(elements)
+            recommendations.extend(content_recommendations)
 
-        print("\nИзвлеченный текст:")
-        print("Заголовки:", extracted_texts['headings'])
-        print("Ключевые слова:", keywords)
-        print("Показатель читаемости:", readability)
+            db_handler.save_analysis(url, recommendations, elements)
 
-        print("\nRecommendations:")
-        for recommendation in recommendations:
-            print(f"- {recommendation}")
+            print("\nИзвлеченный текст:")
+            print("Заголовки:", extracted_texts['headings'])
+            print("Ключевые слова:", keywords)
+            print("Показатель читаемости:", readability)
+
+            print("\nRecommendations:")
+            for recommendation in recommendations:
+                print(f"- {recommendation}")
+
+        except Exception as e:
+            logging.error(f"An error occurred: {e}")
+
+        finally:
+            db_handler.close()
+
+    else:
+        logging.error("Failed to load the page.")
 
     # Using SeleniumScraper
     # selenium_scraper = SeleniumScraper()
