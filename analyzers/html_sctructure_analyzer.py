@@ -1,134 +1,192 @@
 from .base_analyzer import BaseAnalyzer
 import requests
+import re
+from bs4 import BeautifulSoup
+from typing import List, Dict, Any
+
 
 class HTMLStructureAnalyzer(BaseAnalyzer):
-    def analyze(self, soup, url):
-        """Analyses HTML content and extracts key elements."""
+    def analyze(self, soup: BeautifulSoup, url: str) -> Dict[str, Any]:
+        """Analyzes HTML content and extracts key elements."""
         self.logger.info("Starting HTML structure analysis")
 
-        elements = {
-            'titles': self.extract_titles(soup),
-            'meta': self.extract_meta(soup),
-            'links': self.extract_links(soup),
-            'images': self.extract_images(soup),
-            'buttons': self.extract_buttons(soup)
+        elements = self.extract_elements(soup)
+        issues = self.check_issues(soup, elements["links"], url)
+        recommendations = self.generate_recommendations({**elements, **issues}, soup, url)
+
+        return {
+            "elements": elements,
+            "issues": issues,
+            "recommendations": recommendations,
         }
 
-        recommendations = self.generate_recommendations(elements, soup, url)
-        return {'elements': elements, 'recommendations': recommendations}
+    def extract_elements(self, soup: BeautifulSoup) -> Dict[str, Any]:
+        """Extracts key elements from the page."""
+        return {
+            "titles": self.extract_titles(soup),
+            "meta": self.extract_meta(soup),
+            "links": self.extract_links(soup),
+            "images": self.extract_images(soup),
+            "buttons": self.extract_buttons(soup),
+        }
 
-    def extract_titles(self, soup):
-        """Extracts the title of the page."""
-        titles = soup.find_all(["title", "h1", "h2", "h3", "h4", "h5", "h6"])
-        return [title.get_text(strip=True) for title in titles]
+    def check_issues(self, soup: BeautifulSoup, links: List[Dict[str, str]], url: str) -> Dict[str, Any]:
+        """Performs various checks and returns detected issues."""
+        return {
+            "accessibility_issues": self.check_accessibility(soup),
+            "links_status": self.check_links(links, url),
+            "deprecated_elements": self.check_deprecated_elements(soup),
+            "heading_structure": self.analyze_heading_structure(soup),
+            "script_and_css_loading": self.analyze_script_and_css_loading(soup),
+        }
 
-    def extract_meta(self, soup):
-        """Extracts the meta tags of the page."""
-        meta_tags = soup.find_all("meta")
+    def extract_titles(self, soup: BeautifulSoup) -> List[str]:
+        """Extracts titles (h1-h6 and <title>)."""
+        return [
+            title.get_text(strip=True)
+            for title in soup.find_all(["title", "h1", "h2", "h3", "h4", "h5", "h6"])
+        ]
+
+    def extract_meta(self, soup: BeautifulSoup) -> Dict[str, str]:
+        """Extracts meta tags with name or property attributes."""
         meta_info = {}
-        for meta in meta_tags:
-            if "name" in meta.attrs and "content" in meta.attrs:
+        for meta in soup.find_all("meta"):
+            if meta.get("name") and meta.get("content"):
                 meta_info[meta["name"]] = meta["content"]
-            elif "property" in meta.attrs and "content" in meta.attrs:
+            elif meta.get("property") and meta.get("content"):
                 meta_info[meta["property"]] = meta["content"]
         return meta_info
 
-    def extract_links(self, soup):
-        """Extracts the links in the page."""
-        links = soup.find_all("a", href=True)
-        return [{"text": link.get_text(strip=True), 'href': link['href']} for link in links]
+    def extract_links(self, soup: BeautifulSoup) -> List[Dict[str, str]]:
+        """Extracts all anchor links."""
+        return [
+            {"text": link.get_text(strip=True), "href": link["href"]}
+            for link in soup.find_all("a", href=True)
+        ]
 
-    def extract_images(self, soup):
-        """Extracts the images in the page."""
-        images = soup.find_all("img", src=True)
-        return [{'alt': img.get('alt', ''), 'src': img['src']} for img in images]
+    def extract_images(self, soup: BeautifulSoup) -> List[Dict[str, str]]:
+        """Extracts image sources and alt attributes."""
+        return [
+            {"alt": img.get("alt", ""), "src": img["src"]}
+            for img in soup.find_all("img", src=True)
+        ]
 
-    def extract_buttons(self, soup):
-        """Extracts the buttons, input['button'] in the page."""
-        buttons = soup.find_all(['button', 'input'], {'type': ['button', 'submit']})
+    def extract_buttons(self, soup: BeautifulSoup) -> List[str]:
+        """Extracts text of buttons and input[type=button]."""
+        buttons = soup.find_all(["button", "input"], {"type": ["button", "submit"]})
         return [button.get_text(strip=True) for button in buttons]
 
-    def check_sitemap(self, url):
-        """Checks for the existence of a sitemap.xml file."""
-        sitemap_url = f"{url.rstrip('/')}/sitemap.xml"
+    def check_links(self, links: List[Dict[str, str]], base_url: str) -> List[Dict[str, Any]]:
+        """Checks the status of links."""
+        statuses = []
+        for link in links:
+            full_url = self.resolve_url(link["href"], base_url)
+            status = self.get_link_status(full_url)
+            statuses.append({"url": full_url, "status": status})
+        return statuses
+
+    def resolve_url(self, href: str, base_url: str) -> str:
+        """Resolves a relative URL to an absolute one."""
+        if not re.match(r"^https?://", href):
+            return requests.compat.urljoin(base_url, href)
+        return href
+
+    def get_link_status(self, url: str) -> str:
+        """Performs a HEAD request to check the status of a URL."""
         try:
-            response = requests.head(sitemap_url, timeout=5)
-            if response.status_code == 200:
-                return True, sitemap_url
-            return False, sitemap_url
+            response = requests.head(url, timeout=5)
+            return response.status_code
         except requests.exceptions.RequestException:
-            return False, sitemap_url
+            return "Error"
 
-    def analyze_page_speed(self, soup):
-        """Basic analysis of page size and optimization hints."""
-        total_speed = 0
-        for tag in soup.find_all(['img', 'script', 'link']):
-            if tag.name == 'img' and tag.get('src'):
-                total_speed += self.estimate_resource_size(tag['src'])
-            elif tag.name == 'script' and tag.get('src'):
-                total_speed += self.estimate_resource_size(tag['src'])
-            elif tag.name == 'link' and tag.get('href'):
-                total_speed += self.estimate_resource_size(tag['href'])
-        return total_speed
+    def check_accessibility(self, soup: BeautifulSoup) -> List[str]:
+        """Checks for accessibility issues."""
+        issues = []
+        missing_aria = soup.find_all(attrs={"aria-label": False})
+        if missing_aria:
+            issues.append(f"{len(missing_aria)} elements missing aria-label attributes.")
 
-    def estimate_resource_size(self, resource_url):
-        """Attempts to estimate the size of a resource."""
-        try:
-            response = requests.head(resource_url, timeout=5)
-            if response.status_code == 200 and 'Content-Length' in response.headers:
-                return int(response.headers['Content-Length'])
-        except requests.exceptions.RequestException:
-            pass
-        return 0
+        non_semantic_tags = soup.find_all(
+            ["div", "span"], recursive=True, attrs={"role": None}
+        )
+        if non_semantic_tags:
+            issues.append(f"{len(non_semantic_tags)} non-semantic tags found without roles.")
 
-    def generate_recommendations(self, elements, soup, url):
-        """Generates recommendations based on the extracted elements."""
+        return issues
+
+    def check_deprecated_elements(self, soup: BeautifulSoup) -> List[str]:
+        """Checks for deprecated tags and attributes."""
+        deprecated_tags = {
+            "center",
+            "font",
+            "big",
+            "small",
+            "strike",
+            "u",
+            "frame",
+            "frameset",
+            "noframes",
+            "applet",
+            "bgsound",
+            "basefont",
+            "s",
+            "tt",
+            "i",
+            "b",
+            "isindex",
+            "menu",
+            "acronym",
+            "dir",
+            "listing",
+            "plaintext",
+            "marquee"
+        }
+        deprecated_attributes = {"align", "bgcolor"}
+
+        issues = []
+        for tag in deprecated_tags:
+            if soup.find(tag):
+                issues.append(f"Deprecated tag <{tag}> found.")
+        for attr in deprecated_attributes:
+            if soup.find(attrs={attr: True}):
+                issues.append(f"Deprecated attribute '{attr}' found.")
+        return issues
+
+    def analyze_heading_structure(self, soup: BeautifulSoup) -> List[str]:
+        """Analyzes heading levels for proper structure."""
+        headings = [int(h.name[1]) for h in soup.find_all(re.compile("^h[1-6]$"))]
+        issues = [
+            f"Improper heading structure: <h{headings[i]}> follows <h{headings[i - 1]}>."
+            for i in range(1, len(headings))
+            if headings[i] > headings[i - 1] + 1
+        ]
+        return issues
+
+    def analyze_script_and_css_loading(self, soup: BeautifulSoup) -> List[str]:
+        """Analyzes JS and CSS loading strategies."""
+        issues = []
+        scripts = soup.find_all("script", src=True)
+        for script in scripts:
+            if not script.get("async") and not script.get("defer"):
+                issues.append(f"Script {script['src']} is missing 'async' or 'defer'.")
+        return issues
+
+    def generate_recommendations(self, data: Dict[str, Any], soup: BeautifulSoup, url: str) -> List[str]:
+        """Generates recommendations based on extracted data and issues."""
         recommendations = []
-        required_tags = ['main', 'header', 'footer']
 
-        # TODO: нужно добавить еще проверок и довести этот метод до конца
+        if not data["titles"]:
+            recommendations.append("Add a <title> tag for SEO.")
+        if "description" not in data["meta"]:
+            recommendations.append("Add a meta description tag for SEO.")
 
-        # Check for title tag
-        if not elements['titles']:
-            recommendations.append("Add a <title> tag to improve SEO.")
-        else:
-            title_text = elements['titles'][0]
-            if len(title_text) < 10 or len(title_text) > 70:
-                recommendations.append("The <title> tag should be between 10 and 70 characters long.")
-
-        # Check for meta description tag
-        if 'description' not in elements['meta']:
-            recommendations.append("Add a ‘description’ meta tag to improve SEO.")
-        else:
-            description = elements['meta']['description']
-            if len(description) < 50 or len(description) > 160:
-                recommendations.append("The ‘description’ meta tag should be between 50 and 160 characters long.")
-
-        # Check for images without alt attribute
-        images_without_alt = [img for img in elements['images'] if not img['alt']]
+        images_without_alt = [img for img in data["images"] if not img["alt"]]
         if images_without_alt:
-            recommendations.append(f"{len(images_without_alt)} images are missing the 'alt' attribute.")
+            recommendations.append(f"{len(images_without_alt)} images are missing alt attributes.")
 
-        # Check for multiple <h1> tags
-        h1_tags = [title for title in elements['titles'] if 'h1' in str(title)]
-        if len(h1_tags) == 0:
-            recommendations.append("Add an <h1> tag to indicate the main title of the page.")
-        elif len(h1_tags) > 1:
-            recommendations.append("Having more than one <h1> tag can confuse search engines.")
-
-        # Check if required tags are present
-        for tag in required_tags:
-            if not soup.find(tag):
-                recommendations.append(f"Consider adding a <{tag}> tag to improve semantic structure.")
-
-        sitemap_exists, sitemap_url = self.check_sitemap(url)
-        if not sitemap_exists:
-            recommendations.append(f"No sitemap.xml found. Consider adding one for better SEO. Expected location: {sitemap_url}")
-        else:
-            recommendations.append(f"Sitemap.xml found at: {sitemap_url}")
-
-        total_size = self.analyze_page_speed(soup)
-        if total_size > 2 * 1024 * 1024:  # More than 2 MB
-            recommendations.append(f"The page size is large ({total_size / 1024 / 1024:.2f} MB). Consider optimizing resources such as images, scripts, and stylesheets.")
+        if len(data["links_status"]) > 0:
+            broken_links = [link for link in data["links_status"] if link["status"] != 200]
+            if broken_links:
+                recommendations.append(f"{len(broken_links)} broken links found.")
 
         return recommendations

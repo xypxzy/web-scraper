@@ -34,6 +34,7 @@ def main():
 
             elements = structure_results['elements']
             recommendations = structure_results['recommendations']
+            issues = structure_results['issues']
 
             # Text analysis
             text_analyzer = TextAnalyzer()
@@ -69,6 +70,10 @@ def main():
             print("\nRecommendations:")
             for recommendation in recommendations:
                 print(f"- {recommendation}")
+
+            print("\nIssues:")
+            for issue in issues:
+                print(f"- {issue}: {issues[issue]}")
 
         except Exception as e:
             logging.error(f"An error occurred: {e}")
