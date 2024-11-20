@@ -1,4 +1,3 @@
-from analyzers.content_analyzer import ContentAnalyzer
 from analyzers.html_sctructure_analyzer import HTMLStructureAnalyzer
 from analyzers.seo_analyzer import SEOAnalyzer
 from analyzers.text_analyzer import TextAnalyzer
@@ -54,11 +53,6 @@ def main():
             seo_analyzer = SEOAnalyzer()
             seo_recommendations = seo_analyzer.analyze(elements)
             recommendations.extend(seo_recommendations)
-
-            # Content analysis
-            content_analyzer = ContentAnalyzer()
-            content_recommendations = content_analyzer.analyze(elements)
-            recommendations.extend(content_recommendations)
 
             db_handler.save_analysis(url, recommendations, elements)
 

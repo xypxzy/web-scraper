@@ -6,3 +6,5 @@ transformers
 torch
 keybert
 textstat
+spacy
+sentencepiece
