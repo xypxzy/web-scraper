@@ -8,3 +8,6 @@ keybert
 textstat
 spacy
 sentencepiece
+sentence-transformers
+readability
+numpy

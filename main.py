@@ -39,14 +39,10 @@ def main():
             text_analyzer = TextAnalyzer()
             extracted_texts = text_analyzer.extract_text(html_content)
             full_text = extracted_texts['full_text']
+            reference_keywords = text_analyzer.analyze_keywords(full_text)
 
-            sentiment_results = text_analyzer.analyze_sentiment(extracted_texts['headings'])
-            readability = text_analyzer.readability_score(full_text)
-            keywords = text_analyzer.analyze_keywords(full_text)
+            text_recommendations = text_analyzer.generate_recommendations(extracted_texts, full_text, reference_keywords)
 
-            text_recommendations = text_analyzer.generate_recommendations(extracted_texts, sentiment_results,
-                                                                          readability,
-                                                                          keywords)
             recommendations.extend(text_recommendations)
 
             # SEO analysis
@@ -55,11 +51,6 @@ def main():
             recommendations.extend(seo_recommendations)
 
             db_handler.save_analysis(url, recommendations, elements)
-
-            print("\nИзвлеченный текст:")
-            print("Заголовки:", extracted_texts['headings'])
-            print("Ключевые слова:", keywords)
-            print("Показатель читаемости:", readability)
 
             print("\nRecommendations:")
             for recommendation in recommendations:
