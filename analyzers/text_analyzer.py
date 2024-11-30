@@ -1,26 +1,35 @@
 import logging
 import re
+import random
 from collections import defaultdict
+from enum import Enum
 from typing import Any, Dict, List, Optional
 
-from readability import Document as ReadabilityDocument  # For content extraction
-import textstat  # For readability metrics
-import spacy
 import torch
 from bs4 import BeautifulSoup
 from keybert import KeyBERT
+from readability import Document as ReadabilityDocument  # For content extraction
 from sentence_transformers import SentenceTransformer, util
+from spacy.language import Language
+import spacy
 from transformers import (
     T5ForConditionalGeneration,
     T5Tokenizer,
     pipeline
 )
+import textstat  # For readability metrics
 
 from analyzers.base_analyzer import BaseAnalyzer
 
 # Configure logging
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
+
+
+class RecommendationStrategy(Enum):
+    DEFAULT = 1
+    AGGRESSIVE = 2
+    CONSERVATIVE = 3
 
 
 class TextAnalyzer(BaseAnalyzer):
@@ -44,7 +53,7 @@ class TextAnalyzer(BaseAnalyzer):
                 'sentiment-analysis',
                 model='cardiffnlp/twitter-roberta-base-sentiment',
                 tokenizer='cardiffnlp/twitter-roberta-base-sentiment',
-                device=self.device_id
+                device=self.device_id  # -1 for CPU, 0 for first GPU
             )
             logger.info("Sentiment analysis pipeline initialized successfully.")
         except Exception as e:
@@ -83,9 +92,9 @@ class TextAnalyzer(BaseAnalyzer):
                 "text-classification",
                 model="j-hartmann/emotion-english-distilroberta-base",
                 return_all_scores=True,
-                device=self.device_id
+                device=self.device_id  # -1 for CPU, 0 for first GPU
             )
-            logger.info("Emotion analysis model initialized successfully.")
+            logger.info("Emotion analysis pipeline initialized successfully.")
         except Exception as e:
             logger.error(f"Failed to initialize emotion analyzer: {e}")
             raise e
@@ -98,7 +107,7 @@ class TextAnalyzer(BaseAnalyzer):
             logger.error(f"Failed to initialize keyword extraction model: {e}")
             raise e
 
-    def get_spacy_model(self, language: str):
+    def get_spacy_model(self, language: str) -> Language:
         """
         Loads the spaCy model for the specified language.
 
@@ -164,7 +173,14 @@ class TextAnalyzer(BaseAnalyzer):
             else:
                 input_text = f"{task}: {text}"
 
-            tokens = self.t5_tokenizer.encode(input_text, return_tensors="pt").to(self.torch_device)
+            # Tokenize with truncation to ensure input does not exceed max length
+            tokens = self.t5_tokenizer.encode(
+                input_text,
+                return_tensors="pt",
+                truncation=True,
+                max_length=self.t5_tokenizer.model_max_length
+            ).to(self.torch_device)
+
             summary_ids = self.t5_model.generate(
                 tokens,
                 max_length=150,
@@ -323,7 +339,12 @@ class TextAnalyzer(BaseAnalyzer):
             Dict[str, float]: Dictionary of emotions with their probabilities.
         """
         try:
-            emotions = self.emotion_analyzer(text)
+            # Use the pipeline directly with text, allowing it to handle tokenization and device placement
+            emotions = self.emotion_analyzer(
+                text,
+                truncation=True,       # Ensure text is truncated to the model's max length
+                max_length=512         # Adjust based on the model's capabilities
+            )
             # Aggregate emotions and their scores
             emotion_scores = defaultdict(float)
             for res in emotions:
@@ -483,16 +504,24 @@ class TextAnalyzer(BaseAnalyzer):
                 "summarize": "summarize:",
                 "expand": "elaborate on:",
                 "paraphrase": "paraphrase:"
-            }.get(mode, f"{mode}:")
+            }.get(mode, f"{mode}:")  # Default to custom mode if not predefined
 
             input_text = f"{task_prefix} {text}"
-            tokens = self.t5_tokenizer.encode(input_text, return_tensors="pt").to(self.torch_device)
+            # Tokenize with truncation to ensure input does not exceed max length
+            tokens = self.t5_tokenizer.encode(
+                input_text,
+                return_tensors="pt",
+                truncation=True,
+                max_length=self.t5_tokenizer.model_max_length
+            ).to(self.torch_device)
+
             rewritten_ids = self.t5_model.generate(
                 tokens,
                 max_length=512,
                 min_length=50,
                 num_beams=5,
                 early_stopping=True
+                # Removed 'truncation=True' as it's not a valid argument for generate
             )
             rewritten_text = self.t5_tokenizer.decode(rewritten_ids[0], skip_special_tokens=True)
             return rewritten_text
@@ -505,16 +534,18 @@ class TextAnalyzer(BaseAnalyzer):
         extracted_data: Dict[str, Any],
         full_text: str,
         reference_keywords: Optional[List[Dict[str, Any]]] = None,
-        user_goals: Optional[List[str]] = None
+        user_goals: Optional[List[str]] = None,
+        strategy: RecommendationStrategy = RecommendationStrategy.DEFAULT
     ) -> List[str]:
         """
-        Generates recommendations based on extracted analysis results.
+        Generates recommendations based on extracted analysis results and the selected strategy.
 
         Args:
             extracted_data (Dict[str, Any]): Extracted data (headings, paragraphs, etc.).
             full_text (str): Full text for analysis.
-            reference_keywords (Optional[List[str]]): Reference keywords.
+            reference_keywords (Optional[List[Dict[str, Any]]]): Reference keywords.
             user_goals (Optional[List[str]]): User goals.
+            strategy (RecommendationStrategy): Selected recommendation strategy.
 
         Returns:
             List[str]: List of recommendations.
@@ -527,69 +558,44 @@ class TextAnalyzer(BaseAnalyzer):
             # Personalize recommendations based on user goals
             goals = user_goals if user_goals else ["general"]
 
-            # Analyze sentiment of headings
-            headings = extracted_data.get('headings', [])
-            if headings:
-                heading_sentiments = self.analyze_sentiment('. '.join(headings))
-                for heading, sentiment in zip(headings, heading_sentiments):
-                    if sentiment['label'].lower() != 'positive':
-                        recommendations.append(
-                            f"Consider improving the tone of the headline: '{heading}' (Sentiment: {sentiment['label']})"
-                        )
-                    if len(heading.split()) > 10:
-                        recommendations.append(f"The headline is too long: '{heading}'. Consider shortening it.")
-
-            # Analyze readability
-            readability_metrics = self.analyze_text_complexity(full_text)
-            if readability_metrics:
-                grade_level = readability_metrics.get("flesch_kincaid_grade", 0)
-                if grade_level > 8:
-                    recommendations.append("The text is relatively complex. Simplify it for better reader engagement.")
+            # Apply strategy-specific recommendations
+            if strategy == RecommendationStrategy.DEFAULT:
+                self._recommend_sentiment_analysis(extracted_data, recommendations)
+                self._recommend_readability(full_text, recommendations)
+                self._recommend_keywords(full_text, recommendations)
+                self._recommend_text_structure(full_text, recommendations)
+                self._recommend_emotions(full_text, recommendations)
+                if reference_keywords:
+                    self._recommend_semantic_similarity(full_text, reference_keywords, recommendations)
+                self._recommend_rewritten_text(full_text, recommendations)
+            elif strategy == RecommendationStrategy.AGGRESSIVE:
+                # More stringent recommendations
+                self._recommend_sentiment_analysis(extracted_data, recommendations)
+                self._recommend_readability(full_text, recommendations)
+                self._recommend_keywords(full_text, recommendations)
+                self._recommend_text_structure(full_text, recommendations)
+                self._recommend_emotions(full_text, recommendations)
+                if reference_keywords:
+                    self._recommend_semantic_similarity(full_text, reference_keywords, recommendations)
+                # Additional aggressive recommendation
+                recommendations.append("Consider a complete redesign of the text structure to enhance effectiveness.")
+                self._recommend_rewritten_text(full_text, recommendations)
+            elif strategy == RecommendationStrategy.CONSERVATIVE:
+                # Less intrusive recommendations
+                self._recommend_sentiment_analysis(extracted_data, recommendations)
+                self._recommend_readability(full_text, recommendations)
+                self._recommend_keywords(full_text, recommendations)
+                # Limit to only a few recommendations
             else:
-                recommendations.append("Unable to calculate readability metrics.")
-
-            # Keyword analysis
-            keywords = self.analyze_keywords(full_text)
-            if len(keywords) < 5:
-                recommendations.append("Add more relevant keywords to improve SEO visibility.")
-            else:
-                recommendations.append(f"Identified keywords: {', '.join([kw['keyword'] for kw in keywords])}")
-
-            # Text structure analysis
-            text_structure = self.analyze_text_structure(full_text)
-            if text_structure:
-                if text_structure["avg_sentence_length"] > 20:
-                    recommendations.append("Consider shortening your sentences to improve readability.")
-                if text_structure["passive_voice_ratio"] > 0.2:
-                    recommendations.append("Reduce the use of passive voice to make the text more engaging.")
-                if text_structure["repetition_ratio"] > 0.1:
-                    recommendations.append("Reduce word repetition to enhance the text's clarity.")
-
-            # Emotional analysis
-            emotions = self.analyze_emotions(full_text)
-            if emotions:
-                dominant_emotion = max(emotions, key=emotions.get)
-                if dominant_emotion.lower() not in ["joy", "trust"]:
-                    recommendations.append(
-                        f"The dominant emotion in the text is '{dominant_emotion}'. Consider adjusting the tone."
-                    )
-
-            # Semantic similarity analysis
-            if reference_keywords:
-                similarity_results = self.semantic_similarity(full_text, reference_keywords)
-                mean_similarity = similarity_results.get("mean_similarity", 0.0)
-                if mean_similarity < 0.7:
-                    recommendations.append(
-                        f"The text has low semantic similarity ({mean_similarity:.2f}) with target keywords. Consider revising it."
-                    )
-                else:
-                    recommendations.append(
-                        f"The text is semantically aligned with your target keywords (Similarity: {mean_similarity:.2f})."
-                    )
-
-            # Generate alternative text suggestions
-            rewritten_text = self.rewrite_text(full_text, mode="simplify")
-            recommendations.append(f"Suggested simplified version of the text: {rewritten_text}")
+                logger.warning(f"Unknown recommendation strategy: {strategy}. Using DEFAULT strategy.")
+                self._recommend_sentiment_analysis(extracted_data, recommendations)
+                self._recommend_readability(full_text, recommendations)
+                self._recommend_keywords(full_text, recommendations)
+                self._recommend_text_structure(full_text, recommendations)
+                self._recommend_emotions(full_text, recommendations)
+                if reference_keywords:
+                    self._recommend_semantic_similarity(full_text, reference_keywords, recommendations)
+                self._recommend_rewritten_text(full_text, recommendations)
 
             recommendations.append("---------- End of recommendations ----------")
 
@@ -599,3 +605,183 @@ class TextAnalyzer(BaseAnalyzer):
             raise e
 
         return recommendations
+
+    def _recommend_sentiment_analysis(self, extracted_data: Dict[str, Any], recommendations: List[str]):
+        """
+        Generates recommendations based on sentiment analysis of headings.
+
+        Args:
+            extracted_data (Dict[str, Any]): Extracted data containing headings.
+            recommendations (List[str]): List to append recommendations.
+        """
+        headings = extracted_data.get('headings', [])
+        if headings:
+            # Join headings into a single string for sentiment analysis
+            heading_sentiments = self.analyze_sentiment('. '.join(headings))
+            for heading, sentiment in zip(headings, heading_sentiments):
+                if sentiment['label'].lower() != 'positive':
+                    recommendations.append(
+                        f"Consider improving the tone of the headline: '{heading}' (Sentiment: {sentiment['label']})"
+                    )
+                if len(heading.split()) > 10:
+                    recommendations.append(f"The headline is too long: '{heading}'. Consider shortening it.")
+
+    def _recommend_readability(self, full_text: str, recommendations: List[str]):
+        """
+        Generates recommendations based on readability metrics.
+
+        Args:
+            full_text (str): The full text to analyze.
+            recommendations (List[str]): List to append recommendations.
+        """
+        readability_metrics = self.analyze_text_complexity(full_text)
+        if readability_metrics:
+            grade_level = readability_metrics.get("flesch_kincaid_grade", 0)
+            if grade_level > 8:
+                recommendations.append("The text is relatively complex. Simplify it for better reader engagement.")
+        else:
+            recommendations.append("Unable to calculate readability metrics.")
+
+    def _recommend_keywords(self, full_text: str, recommendations: List[str]):
+        """
+        Generates recommendations based on keyword analysis.
+
+        Args:
+            full_text (str): The full text to analyze.
+            recommendations (List[str]): List to append recommendations.
+        """
+        keywords = self.analyze_keywords(full_text)
+        if len(keywords) < 5:
+            recommendations.append("Add more relevant keywords to improve SEO visibility.")
+        else:
+            recommendations.append(f"Identified keywords: {', '.join([kw['keyword'] for kw in keywords])}")
+
+    def _recommend_text_structure(self, full_text: str, recommendations: List[str]):
+        """
+        Generates recommendations based on text structure analysis.
+
+        Args:
+            full_text (str): The full text to analyze.
+            recommendations (List[str]): List to append recommendations.
+        """
+        text_structure = self.analyze_text_structure(full_text)
+        if text_structure:
+            if text_structure["avg_sentence_length"] > 20:
+                recommendations.append("Consider shortening your sentences to improve readability.")
+            if text_structure["passive_voice_ratio"] > 0.2:
+                recommendations.append("Reduce the use of passive voice to make the text more engaging.")
+            if text_structure["repetition_ratio"] > 0.1:
+                recommendations.append("Reduce word repetition to enhance the text's clarity.")
+
+    def _recommend_emotions(self, full_text: str, recommendations: List[str]):
+        """
+        Generates recommendations based on emotional analysis.
+
+        Args:
+            full_text (str): The full text to analyze.
+            recommendations (List[str]): List to append recommendations.
+        """
+        emotions = self.analyze_emotions(full_text)
+        if emotions:
+            dominant_emotion = max(emotions, key=emotions.get)
+            if dominant_emotion.lower() not in ["joy", "trust"]:
+                recommendations.append(
+                    f"The dominant emotion in the text is '{dominant_emotion}'. Consider adjusting the tone."
+                )
+
+    def _recommend_semantic_similarity(self, full_text: str, reference_keywords: List[Dict[str, Any]], recommendations: List[str]):
+        """
+        Generates recommendations based on semantic similarity analysis.
+
+        Args:
+            full_text (str): The full text to analyze.
+            reference_keywords (List[Dict[str, Any]]): Reference keywords.
+            recommendations (List[str]): List to append recommendations.
+        """
+        similarity_results = self.semantic_similarity(full_text, reference_keywords)
+        mean_similarity = similarity_results.get("mean_similarity", 0.0)
+        if mean_similarity < 0.7:
+            recommendations.append(
+                f"The text has low semantic similarity ({mean_similarity:.2f}) with target keywords. Consider revising it."
+            )
+        else:
+            recommendations.append(
+                f"The text is semantically aligned with your target keywords (Similarity: {mean_similarity:.2f})."
+            )
+
+    def _recommend_rewritten_text(self, full_text: str, recommendations: List[str]):
+        """
+        Generates and appends a rewritten version of the text.
+
+        Args:
+            full_text (str): The full text to rewrite.
+            recommendations (List[str]): List to append recommendations.
+        """
+        rewritten_text = self.rewrite_text(full_text, mode="simplify")
+        recommendations.append(f"Suggested simplified version of the text: {rewritten_text}")
+
+    def _choose_strategy(self, strategies: List[tuple]) -> RecommendationStrategy:
+        """
+        Selects a recommendation strategy based on provided weights.
+
+        Args:
+            strategies (List[tuple]): List of tuples containing (strategy, weight).
+
+        Returns:
+            RecommendationStrategy: Selected recommendation strategy.
+        """
+        strategy_names, weights = zip(*strategies)
+        chosen_strategy = random.choices(strategy_names, weights=weights, k=1)[0]
+        logger.info(f"Selected recommendation strategy: {chosen_strategy.name}")
+        return chosen_strategy
+
+    def generate_recommendations_with_ab_testing(
+        self,
+        extracted_data: Dict[str, Any],
+        full_text: str,
+        reference_keywords: Optional[List[Dict[str, Any]]] = None,
+        user_goals: Optional[List[str]] = None
+    ) -> Dict[str, Any]:
+        """
+        Generates recommendations using A/B testing to select different strategies.
+
+        Args:
+            extracted_data (Dict[str, Any]): Extracted data.
+            full_text (str): The full text to analyze.
+            reference_keywords (Optional[List[Dict[str, Any]]]): Reference keywords.
+            user_goals (Optional[List[str]]): User goals.
+
+        Returns:
+            Dict[str, Any]: Generated recommendations along with the strategy used.
+        """
+        try:
+            # Define strategies with their respective probabilities
+            strategies = [
+                (RecommendationStrategy.DEFAULT, 0.5),
+                (RecommendationStrategy.AGGRESSIVE, 0.3),
+                (RecommendationStrategy.CONSERVATIVE, 0.2)
+            ]
+            strategy = self._choose_strategy(strategies)
+
+            recommendations = self.generate_recommendations(
+                extracted_data,
+                full_text,
+                reference_keywords,
+                user_goals,
+                strategy=strategy
+            )
+
+            # Log the selected strategy
+            logger.info(f"Used strategy {strategy.name} for generating recommendations.")
+
+            return {
+                "strategy": strategy.name,
+                "recommendations": recommendations
+            }
+
+        except Exception as e:
+            logger.error(f"Error generating recommendations with A/B testing: {e}")
+            return {
+                "strategy": "ERROR",
+                "recommendations": ["An error occurred during recommendation generation."]
+            }

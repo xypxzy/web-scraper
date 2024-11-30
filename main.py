@@ -10,8 +10,8 @@ def main():
     logging.basicConfig(level=logging.INFO)
 
     # URL to scrape
-    url = "https://dastan-test.goldkeeper.net/html/phantom/index.html"
-    # url = "https://world.hey.com/dhh/to-the-crazy-ones-e43822c7?ref=dailydev"
+    # url = "https://dastan-test.goldkeeper.net/html/phantom/index.html"
+    url = "https://world.hey.com/dhh/to-the-crazy-ones-e43822c7?ref=dailydev"
 
     # TODO: по сути нужно использовать только один,
     #  потому что один для динамического контента, а другой для статического.
