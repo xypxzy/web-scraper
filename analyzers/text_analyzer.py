@@ -1,92 +1,138 @@
-import readability
-from transformers import pipeline, T5Tokenizer, T5ForConditionalGeneration
-from .base_analyzer import BaseAnalyzer
+import logging
+import re
+from collections import defaultdict
+from typing import Any, Dict, List, Optional
+
+from readability import Document as ReadabilityDocument  # For content extraction
+import textstat  # For readability metrics
 import spacy
 import torch
-import logging
-from functools import lru_cache
+from bs4 import BeautifulSoup
 from keybert import KeyBERT
 from sentence_transformers import SentenceTransformer, util
-from collections import defaultdict
-import readability
-import re
+from transformers import (
+    T5ForConditionalGeneration,
+    T5Tokenizer,
+    pipeline
+)
 
-# Set up logging
+from analyzers.base_analyzer import BaseAnalyzer
+
+# Configure logging
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
 
 class TextAnalyzer(BaseAnalyzer):
-    def __init__(self, analysis_depth='advanced'):
+    def __init__(self, analysis_depth: str = 'advanced'):
         super().__init__()
         logger.info("Initializing text analysis pipelines...")
 
         # Analysis depth (basic, advanced)
         self.analysis_depth = analysis_depth
-        # Detect device (CPU or GPU)
-        self.device = 0 if torch.cuda.is_available() else -1
 
-        # Sentiment Analysis Model
+        # Determine device (CPU or GPU)
+        self.device_id = 0 if torch.cuda.is_available() else -1
+        self.torch_device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
+
+        logger.info(f"Using device: {'CUDA' if self.device_id >= 0 else 'CPU'}")
+
+        # Initialize models
         try:
-            # Load the sentiment analysis pipeline
+            # Sentiment Analysis Model
             self.sentiment_analyzer = pipeline(
                 'sentiment-analysis',
                 model='cardiffnlp/twitter-roberta-base-sentiment',
                 tokenizer='cardiffnlp/twitter-roberta-base-sentiment',
-                device=self.device
+                device=self.device_id
             )
             logger.info("Sentiment analysis pipeline initialized successfully.")
         except Exception as e:
             logger.error(f"Failed to initialize sentiment analyzer: {e}")
-            raise
+            raise e
 
-        # T5 Model for Contextual Analysis
         try:
-            # Load T5 model for contextual analysis
+            # T5 Model for Contextual Analysis
             self.t5_tokenizer = T5Tokenizer.from_pretrained('t5-base')
-            self.t5_model = T5ForConditionalGeneration.from_pretrained("t5-base")
+            self.t5_model = T5ForConditionalGeneration.from_pretrained('t5-base').to(self.torch_device)
             logger.info("T5 contextual analysis pipeline initialized successfully.")
         except Exception as e:
             logger.error(f"Failed to initialize T5 model: {e}")
-            raise
+            raise e
 
-        # spaCy Models for lemmatization
         try:
+            # spaCy Models for Lemmatization
             self.nlp_en = spacy.load("en_core_web_md")
             self.loaded_spacy_models = {}
             logger.info("spaCy English model initialized successfully.")
         except Exception as e:
             logger.error(f"Failed to initialize spaCy model: {e}")
-            raise
+            raise e
 
-        # Semantic Similarity Model
         try:
-            self.semantic_model = SentenceTransformer('all-mpnet-base-v2')
+            # Semantic Similarity Model
+            self.semantic_model = SentenceTransformer('all-mpnet-base-v2').to(self.torch_device)
             logger.info("Semantic similarity model initialized successfully.")
         except Exception as e:
             logger.error(f"Failed to initialize semantic similarity model: {e}")
-            raise
+            raise e
 
-    @lru_cache
-    def get_spacy_model(self, language):
-        """Load spaCy model for the specified language."""
+        try:
+            # Emotion Analysis Model
+            self.emotion_analyzer = pipeline(
+                "text-classification",
+                model="j-hartmann/emotion-english-distilroberta-base",
+                return_all_scores=True,
+                device=self.device_id
+            )
+            logger.info("Emotion analysis model initialized successfully.")
+        except Exception as e:
+            logger.error(f"Failed to initialize emotion analyzer: {e}")
+            raise e
+
+        try:
+            # Keyword Extraction Model
+            self.kw_model = KeyBERT('all-mpnet-base-v2')
+            logger.info("Keyword extraction model initialized successfully.")
+        except Exception as e:
+            logger.error(f"Failed to initialize keyword extraction model: {e}")
+            raise e
+
+    def get_spacy_model(self, language: str):
+        """
+        Loads the spaCy model for the specified language.
+
+        Args:
+            language (str): Language code (e.g., 'en' for English).
+
+        Returns:
+            spacy.Language: Loaded spaCy model.
+        """
         if language == "en":
             return self.nlp_en
         if language not in self.loaded_spacy_models:
             try:
                 model_name = f"{language}_core_news_md"
                 self.loaded_spacy_models[language] = spacy.load(model_name)
+                logger.info(f"spaCy model for language '{language}' loaded successfully.")
             except Exception as e:
                 logger.error(f"Failed to load spaCy model for language '{language}': {e}")
-                raise
+                raise e
         return self.loaded_spacy_models[language]
 
-    def analyze_sentiment(self, text):
-        """Analyzes the sentiment of the given text."""
+    def analyze_sentiment(self, text: str) -> List[Dict[str, Any]]:
+        """
+        Analyzes the sentiment of the given text.
+
+        Args:
+            text (str): The text to analyze.
+
+        Returns:
+            List[Dict[str, Any]]: A list of dictionaries containing sentiment labels and scores.
+        """
         try:
             if not text.strip():
                 return [{"label": "NEUTRAL", "score": 1.0}]
-            # Handle neutral sentiments
             sentiment = self.sentiment_analyzer(text, return_all_scores=True)
             results = []
 
@@ -97,10 +143,19 @@ class TextAnalyzer(BaseAnalyzer):
             return results
         except Exception as e:
             logger.error(f"Error analyzing sentiment: {e}")
-            return [{"label": "ERROR", "score": 0.0}]
+            raise e
 
-    def analyze_context(self, text, task="summarize"):
-        """Performs contextual analysis using T5."""
+    def analyze_context(self, text: str, task: str = "summarize") -> str:
+        """
+        Performs contextual analysis using the T5 model.
+
+        Args:
+            text (str): The text to analyze.
+            task (str): The task to perform ('summarize', 'analyze sentiment', etc.).
+
+        Returns:
+            str: The result of the contextual analysis.
+        """
         try:
             if task == "summarize":
                 input_text = f"summarize: {text}"
@@ -109,7 +164,7 @@ class TextAnalyzer(BaseAnalyzer):
             else:
                 input_text = f"{task}: {text}"
 
-            tokens = self.t5_tokenizer.encode(input_text, return_tensors="pt").to(self.t5_model.device)
+            tokens = self.t5_tokenizer.encode(input_text, return_tensors="pt").to(self.torch_device)
             summary_ids = self.t5_model.generate(
                 tokens,
                 max_length=150,
@@ -122,10 +177,25 @@ class TextAnalyzer(BaseAnalyzer):
             return result
         except Exception as e:
             logger.error(f"Error analyzing context with T5: {e}")
-            return "Context analysis failed."
+            raise e
 
-    def lemmatize_and_normalize(self, text, language="en", custom_stop_words=None):
-        """Performs lemmatization and normalization of text based on the language."""
+    def lemmatize_and_normalize(
+        self,
+        text: str,
+        language: str = "en",
+        custom_stop_words: Optional[List[str]] = None
+    ) -> str:
+        """
+        Performs lemmatization and normalization of text based on the language.
+
+        Args:
+            text (str): The text to process.
+            language (str): Language code.
+            custom_stop_words (Optional[List[str]]): List of custom stop words.
+
+        Returns:
+            str: Lemmatized and normalized text.
+        """
         try:
             nlp = self.get_spacy_model(language)
             doc = nlp(text)
@@ -141,19 +211,33 @@ class TextAnalyzer(BaseAnalyzer):
             return normalized_text
         except Exception as e:
             logger.error(f"Error during lemmatization: {e}")
-            return text
+            raise e
 
-    def analyze_keywords(self, text, language="en", max_keywords=10, min_score=0.3):
-        """Extracts and scores keywords from the text."""
+    def analyze_keywords(
+        self,
+        text: str,
+        language: str = "en",
+        max_keywords: int = 10,
+        min_score: float = 0.3
+    ) -> List[Dict[str, Any]]:
+        """
+        Extracts and scores keywords from the text.
+
+        Args:
+            text (str): The text to analyze.
+            language (str): Language code.
+            max_keywords (int): Maximum number of keywords.
+            min_score (float): Minimum score threshold for a keyword.
+
+        Returns:
+            List[Dict[str, Any]]: List of keywords with their scores.
+        """
         try:
             # Preprocess text
             preprocessed_text = self.lemmatize_and_normalize(text, language)
 
-            # Initialize the KeyBERT model
-            kw_model = KeyBERT('all-mpnet-base-v2')
-
-            # Extract keywords using multiple methods
-            keywords = kw_model.extract_keywords(
+            # Extract keywords
+            keywords = self.kw_model.extract_keywords(
                 preprocessed_text,
                 keyphrase_ngram_range=(1, 3),
                 stop_words='english',
@@ -171,30 +255,51 @@ class TextAnalyzer(BaseAnalyzer):
             return filtered_keywords
         except Exception as e:
             logger.error(f"Error analyzing keywords: {e}")
-            return []
+            raise e
 
-    def analyze_text_structure(self, text):
-        """Analyzes the structure of the text and provides insights."""
+    def analyze_text_structure(self, text: str) -> Dict[str, Any]:
+        """
+        Analyzes the structure of the text and provides insights.
+
+        Args:
+            text (str): The text to analyze.
+
+        Returns:
+            Dict[str, Any]: Data about the text structure.
+        """
         try:
             nlp = self.nlp_en
             doc = nlp(text)
 
             # Calculate average sentence length and syntactic complexity
             sentences = list(doc.sents)
+            if not sentences:
+                return {
+                    "avg_sentence_length": 0,
+                    "avg_clauses_per_sentence": 0,
+                    "passive_voice_ratio": 0,
+                    "repetition_ratio": 0,
+                    "total_sentences": 0
+                }
+
             avg_sentence_length = sum(len(sent) for sent in sentences) / len(sentences)
 
             # Syntactic complexity (average number of clauses per sentence)
-            total_clauses = sum(len([token for token in sent if token.dep_ == 'ROOT']) for sent in sentences)
-            avg_clauses_per_sentence = total_clauses / len(sentences)
+            total_clauses = sum(
+                len([token for token in sent if token.dep_ == 'ROOT']) for sent in sentences
+            )
+            avg_clauses_per_sentence = total_clauses / len(sentences) if len(sentences) > 0 else 0
 
             # Passive voice detection
-            passive_sentences = [sent for sent in sentences if any(token.dep_ == 'auxpass' for token in sent)]
-            passive_voice_ratio = len(passive_sentences) / len(sentences)
+            passive_sentences = [
+                sent for sent in sentences if any(token.dep_ == 'auxpass' for token in sent)
+            ]
+            passive_voice_ratio = len(passive_sentences) / len(sentences) if len(sentences) > 0 else 0
 
             # Repetition analysis
             tokens = [token.text.lower() for token in doc if token.is_alpha]
             unique_tokens = set(tokens)
-            repetition_ratio = (len(tokens) - len(unique_tokens)) / len(tokens)
+            repetition_ratio = (len(tokens) - len(unique_tokens)) / len(tokens) if len(tokens) > 0 else 0
 
             return {
                 "avg_sentence_length": avg_sentence_length,
@@ -205,19 +310,20 @@ class TextAnalyzer(BaseAnalyzer):
             }
         except Exception as e:
             logger.error(f"Error analyzing text structure: {e}")
-            return {}
+            raise e
 
-    def analyze_emotions(self, text):
-        """Detects emotions in the given text."""
+    def analyze_emotions(self, text: str) -> Dict[str, float]:
+        """
+        Detects emotions in the given text.
+
+        Args:
+            text (str): The text to analyze.
+
+        Returns:
+            Dict[str, float]: Dictionary of emotions with their probabilities.
+        """
         try:
-            # Use a model that supports multi-label emotion detection
-            emotion_analyzer = pipeline(
-                "text-classification",
-                model="j-hartmann/emotion-english-distilroberta-base",
-                return_all_scores=True,
-                device=self.device
-            )
-            emotions = emotion_analyzer(text)
+            emotions = self.emotion_analyzer(text)
             # Aggregate emotions and their scores
             emotion_scores = defaultdict(float)
             for res in emotions:
@@ -230,21 +336,30 @@ class TextAnalyzer(BaseAnalyzer):
             return dict(emotion_scores)
         except Exception as e:
             logger.error(f"Error analyzing emotions: {e}")
-            return {"ERROR": 1.0}
+            raise e
 
-    def extract_text(self, soup):
-        """Extracts text from HTML content."""
+    def extract_text(self, soup: BeautifulSoup) -> Dict[str, Any]:
+        """
+        Extracts text from HTML content.
+
+        Args:
+            soup (BeautifulSoup): BeautifulSoup object with HTML content.
+
+        Returns:
+            Dict[str, Any]: Extracted headings, paragraphs, and full text.
+        """
         try:
             # Advanced parsing using readability-lxml
-            import readability
-            doc = readability.Document(str(soup))
-            full_text = doc.summary()
+            doc = ReadabilityDocument(str(soup))
+            full_text_html = doc.summary()
 
             # Parse the extracted summary
-            from bs4 import BeautifulSoup
-            summary_soup = BeautifulSoup(full_text, 'html.parser')
+            summary_soup = BeautifulSoup(full_text_html, 'html.parser')
             paragraphs = [p.get_text(strip=True) for p in summary_soup.find_all('p')]
-            headings = [h.get_text(strip=True) for h in summary_soup.find_all(re.compile('^h[1-6]$'))]
+            headings = [
+                h.get_text(strip=True)
+                for h in summary_soup.find_all(re.compile('^h[1-6]$'))
+            ]
 
             # Remove duplicates
             headings = list(dict.fromkeys(headings))
@@ -258,67 +373,120 @@ class TextAnalyzer(BaseAnalyzer):
             }
         except Exception as e:
             logger.error(f"Error extracting text: {e}")
-            return {'headings': [], 'paragraphs': [], 'full_text': ''}
+            raise e
 
-    def analyze_text_complexity(self, text):
-        """Calculates readability and grade level of the text."""
+    def analyze_text_complexity(self, text: str) -> Dict[str, float]:
+        """
+        Calculates readability and grade level of the text.
+
+        Args:
+            text (str): The text to analyze.
+
+        Returns:
+            Dict[str, float]: Readability metrics.
+        """
         try:
-            # Use multiple readability metrics
-            r = readability.getmeasures(text)
-            flesch_reading_ease = r['readability grades']['FleschReadingEase']
-            flesch_kincaid_grade = r['readability grades']['FleschKincaidGradeLevel']
-            gunning_fog = r['readability grades']['GunningFogIndex']
-            smog = r['readability grades']['SMOGIndex']
-            coleman_liau = r['readability grades']['ColemanLiauIndex']
-            automated_readability = r['readability grades']['AutomatedReadabilityIndex']
-
+            # Use textstat for readability metrics
             return {
-                "flesch_reading_ease": flesch_reading_ease,
-                "flesch_kincaid_grade": flesch_kincaid_grade,
-                "gunning_fog_index": gunning_fog,
-                "smog_index": smog,
-                "coleman_liau_index": coleman_liau,
-                "automated_readability_index": automated_readability
+                "flesch_reading_ease": textstat.flesch_reading_ease(text),
+                "flesch_kincaid_grade": textstat.flesch_kincaid_grade(text),
+                "gunning_fog_index": textstat.gunning_fog(text),
+                "smog_index": textstat.smog_index(text),
+                "coleman_liau_index": textstat.coleman_liau_index(text),
+                "automated_readability_index": textstat.automated_readability_index(text)
             }
         except Exception as e:
             logger.error(f"Error calculating text complexity: {e}")
-            return {}
+            raise e
 
-    def semantic_similarity(self, text, reference_keywords):
-        """Calculates the semantic similarity between the text and reference keywords."""
+    def semantic_similarity(
+            self,
+            text: str,
+            reference_keywords: List[Dict[str, Any]]
+    ) -> Dict[str, Any]:
+        """
+        Calculates the semantic similarity between the text and reference keywords.
+
+        Args:
+            text (str): The text to compare.
+            reference_keywords (List[Dict[str, Any]]): List of reference keywords,
+                each represented as a dictionary containing at least a 'keyword' key.
+
+        Returns:
+            Dict[str, Any]: A dictionary containing similarity scores for each keyword
+                and the mean similarity score.
+                Example:
+                {
+                    "similarity_scores": {
+                        "Python": 0.85,
+                        "programming": 0.78,
+                        "language": 0.80
+                    },
+                    "mean_similarity": 0.81
+                }
+        """
         try:
+            # Extract keyword strings from the list of dictionaries
+            keywords = []
+            for kw in reference_keywords:
+                if isinstance(kw, dict):
+                    keyword = kw.get('keyword')
+                    if keyword and isinstance(keyword, str):
+                        keywords.append(keyword)
+                    else:
+                        logger.warning(f"Invalid or missing 'keyword' in: {kw}")
+                else:
+                    logger.warning(f"Expected dict in reference_keywords, got: {type(kw)}")
+
+            if not keywords:
+                logger.error("No valid keywords found in reference_keywords.")
+                raise ValueError("reference_keywords must contain at least one valid 'keyword' string.")
+
             # Detailed similarity mapping
             text_embedding = self.semantic_model.encode([text], convert_to_tensor=True)
-            keyword_embeddings = self.semantic_model.encode(reference_keywords, convert_to_tensor=True)
+            keyword_embeddings = self.semantic_model.encode(keywords, convert_to_tensor=True)
             similarities = util.cos_sim(text_embedding, keyword_embeddings)[0]
-            similarity_scores = dict(zip(reference_keywords, similarities.tolist()))
-            mean_similarity = similarities.mean().item()
+
+            # Convert similarities to a list of floats
+            similarity_values = similarities.tolist()
+
+            # Create a dictionary mapping each keyword to its similarity score
+            similarity_scores = {keyword: score for keyword, score in zip(keywords, similarity_values)}
+
+            # Calculate the mean similarity score
+            mean_similarity = sum(similarity_values) / len(similarity_values) if similarity_values else 0.0
+
             return {
                 "similarity_scores": similarity_scores,
                 "mean_similarity": mean_similarity
             }
+
         except Exception as e:
             logger.error(f"Error calculating semantic similarity: {e}")
-            return {"similarity_scores": {}, "mean_similarity": 0.0}
+            raise e
 
-    def rewrite_text(self, text, mode="simplify"):
-        """Generates an alternative version of the text using T5."""
+    def rewrite_text(self, text: str, mode: str = "simplify") -> str:
+        """
+        Generates an alternative version of the text using the T5 model.
+
+        Args:
+            text (str): The text to rewrite.
+            mode (str): The mode of rewriting ('simplify', 'formalize', etc.).
+
+        Returns:
+            str: The rewritten text.
+        """
         try:
-            if mode == "simplify":
-                task_prefix = "simplify:"
-            elif mode == "formalize":
-                task_prefix = "paraphrase in a formal style:"
-            elif mode == "summarize":
-                task_prefix = "summarize:"
-            elif mode == "expand":
-                task_prefix = "elaborate on:"
-            elif mode == "paraphrase":
-                task_prefix = "paraphrase:"
-            else:
-                task_prefix = f"{mode}:"
+            task_prefix = {
+                "simplify": "simplify:",
+                "formalize": "paraphrase in a formal style:",
+                "summarize": "summarize:",
+                "expand": "elaborate on:",
+                "paraphrase": "paraphrase:"
+            }.get(mode, f"{mode}:")
 
             input_text = f"{task_prefix} {text}"
-            tokens = self.t5_tokenizer.encode(input_text, return_tensors="pt").to(self.t5_model.device)
+            tokens = self.t5_tokenizer.encode(input_text, return_tensors="pt").to(self.torch_device)
             rewritten_ids = self.t5_model.generate(
                 tokens,
                 max_length=512,
@@ -330,48 +498,64 @@ class TextAnalyzer(BaseAnalyzer):
             return rewritten_text
         except Exception as e:
             logger.error(f"Error rewriting text with T5: {e}")
-            return "Text rewriting failed."
+            raise e
 
-    def generate_recommendations(self, extracted_data, full_text, reference_keywords=None, user_goals=None):
+    def generate_recommendations(
+        self,
+        extracted_data: Dict[str, Any],
+        full_text: str,
+        reference_keywords: Optional[List[Dict[str, Any]]] = None,
+        user_goals: Optional[List[str]] = None
+    ) -> List[str]:
         """
         Generates recommendations based on extracted analysis results.
-        Automatically calls relevant analysis methods and combines results.
+
+        Args:
+            extracted_data (Dict[str, Any]): Extracted data (headings, paragraphs, etc.).
+            full_text (str): Full text for analysis.
+            reference_keywords (Optional[List[str]]): Reference keywords.
+            user_goals (Optional[List[str]]): User goals.
+
+        Returns:
+            List[str]: List of recommendations.
         """
         recommendations = [
-            "---------- The text analysis is complete. Here are the recommendations based on the analysis ----------"
+            "---------- Text analysis complete. Here are the recommendations based on the analysis ----------"
         ]
 
         try:
-            # # Personalize recommendations based on user goals
+            # Personalize recommendations based on user goals
             goals = user_goals if user_goals else ["general"]
 
-            # Step 1: Analyze sentiment of headings
-            heading_sentiments = self.analyze_sentiment(extracted_data['headings'])
-            for i, (heading, sentiment) in enumerate(zip(extracted_data['headings'], heading_sentiments)):
-                if sentiment['label'] != 'positive':
-                    recommendations.append(
-                        f"Consider improving the tone of the headline: '{heading}' (Sentiment: {sentiment['label']})"
-                    )
-                if len(heading.split()) > 10:
-                    recommendations.append(f"The headline is too long: '{heading}'. Consider shortening it.")
+            # Analyze sentiment of headings
+            headings = extracted_data.get('headings', [])
+            if headings:
+                heading_sentiments = self.analyze_sentiment('. '.join(headings))
+                for heading, sentiment in zip(headings, heading_sentiments):
+                    if sentiment['label'].lower() != 'positive':
+                        recommendations.append(
+                            f"Consider improving the tone of the headline: '{heading}' (Sentiment: {sentiment['label']})"
+                        )
+                    if len(heading.split()) > 10:
+                        recommendations.append(f"The headline is too long: '{heading}'. Consider shortening it.")
 
-            # Step 2: Analyze readability
-            readability = self.analyze_text_complexity(full_text)
-            if readability:
-                grade_level = readability.get("flesch_kincaid_grade", 0)
+            # Analyze readability
+            readability_metrics = self.analyze_text_complexity(full_text)
+            if readability_metrics:
+                grade_level = readability_metrics.get("flesch_kincaid_grade", 0)
                 if grade_level > 8:
-                    recommendations.append("The text is relatively complex. Simplify it for better engagement.")
+                    recommendations.append("The text is relatively complex. Simplify it for better reader engagement.")
             else:
                 recommendations.append("Unable to calculate readability metrics.")
 
-            # Step 3: Keyword analysis
+            # Keyword analysis
             keywords = self.analyze_keywords(full_text)
             if len(keywords) < 5:
                 recommendations.append("Add more relevant keywords to improve SEO visibility.")
             else:
                 recommendations.append(f"Identified keywords: {', '.join([kw['keyword'] for kw in keywords])}")
 
-            # Step 4: Text structure analysis
+            # Text structure analysis
             text_structure = self.analyze_text_structure(full_text)
             if text_structure:
                 if text_structure["avg_sentence_length"] > 20:
@@ -381,29 +565,29 @@ class TextAnalyzer(BaseAnalyzer):
                 if text_structure["repetition_ratio"] > 0.1:
                     recommendations.append("Reduce word repetition to enhance the text's clarity.")
 
-            # Step 5: Emotional analysis
+            # Emotional analysis
             emotions = self.analyze_emotions(full_text)
             if emotions:
                 dominant_emotion = max(emotions, key=emotions.get)
-                if dominant_emotion not in ["joy", "trust"]:
+                if dominant_emotion.lower() not in ["joy", "trust"]:
                     recommendations.append(
                         f"The dominant emotion in the text is '{dominant_emotion}'. Consider adjusting the tone."
                     )
 
-            # Step 6: Semantic similarity analysis
+            # Semantic similarity analysis
             if reference_keywords:
                 similarity_results = self.semantic_similarity(full_text, reference_keywords)
-                mean_similarity = similarity_results["mean_similarity"]
+                mean_similarity = similarity_results.get("mean_similarity", 0.0)
                 if mean_similarity < 0.7:
                     recommendations.append(
-                        f"The text has low semantic similarity ({mean_similarity:.2f}) with target keywords. Consider revising."
+                        f"The text has low semantic similarity ({mean_similarity:.2f}) with target keywords. Consider revising it."
                     )
                 else:
                     recommendations.append(
                         f"The text is semantically aligned with your target keywords (Similarity: {mean_similarity:.2f})."
                     )
 
-            # Step 7: Generate alternative text suggestions
+            # Generate alternative text suggestions
             rewritten_text = self.rewrite_text(full_text, mode="simplify")
             recommendations.append(f"Suggested simplified version of the text: {rewritten_text}")
 
@@ -412,5 +596,6 @@ class TextAnalyzer(BaseAnalyzer):
         except Exception as e:
             logger.error(f"Error generating recommendations: {e}")
             recommendations.append("An error occurred during recommendation generation.")
+            raise e
 
         return recommendations
